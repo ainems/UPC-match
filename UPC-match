@@ -1,0 +1,35 @@
+--Get Eagle information from Orders, Line Items
+--vertical code = eagle 
+--vertical number = 33
+
+with prod as (
+select
+case when len(li.sku) > 3 then right(li.sku,len(li.sku)-2) else null end as sku2,
+li.sku,
+--Remove first two 0's from beginning of UPC to match with Jan's documents
+o.order_date,
+o.public_order_number
+from staging.line_items li
+left join staging.orders o on o.id = li.order_id
+--Only shipping product id's have sku's assigned to them (not gift cards, etc)
+where o.vertical_id = '33' and li.product_id  like '%shipping%' 
+and li.product_id not like ' ' and li.product_id is not null
+)
+
+select
+upc,
+prod.sku2,
+prod.order_date,
+prod.public_order_number,
+pa.occasion,
+pa.product_brand
+from
+(
+select
+--Remove text 'UPC' from begining of Jan's UPC list
+right(es.essbase_upc_list,len(es.essbase_upc_list)-3) as upc,
+ei.occasion,
+ei.product_brand
+from eagle_ida ei
+left join eagle_skus es on ei.material_number = es.material_numbers) pa
+right join prod on prod.sku2 = pa.upc
