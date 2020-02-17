@@ -1,0 +1,168 @@
+create view eagle_orders_v as (
+
+--join product attributes and clean UPC strings
+with pa as (
+--Remove 'UPC' and replace with '00'
+select 
+concat('00',right(es.essbase_upc_list,len(es.essbase_upc_list)-3)) as sku_upc,
+ei.material_number, ei.occasion, ei.product_brand, ei.size, ei.prod_netwt_oz, 
+trim(replace(substring(ei.prod_dim_in,8,4),'x','')) as prod_length,
+trim(replace(substring(ei.prod_dim_in,1,4),'x','')) as prod_width
+
+from asandfort.eagle_ida ei 
+left join
+asandfort.eagle_skus es on es.material_numbers = ei.material_number
+),
+
+-- get merchant reference number and order number from Cybersource
+c as (
+select
+ct.merchantreferencenumber,
+merchantdefineddatafield3
+from asandfort.cybersource_transactions_v ctv
+left join (
+select
+merchantdefineddatafield3,
+ct.merchantreferencenumber
+from asandfort.cybersource_transactions c
+inner join 
+(select 
+distinct merchantreferencenumber 
+from asandfort.cybersource_transactions) ct 
+on c.merchantreferencenumber = ct.merchantreferencenumber
+where merchantdefineddatafield3 like '%-%'
+group by ct.merchantreferencenumber, c.merchantdefineddatafield3
+) ct
+on ct.merchantreferencenumber = ctv.merchantreferencenumber
+where merchantdefineddatafield3 like '%-%'
+group by ct.merchantreferencenumber,
+merchantdefineddatafield3
+)
+
+select
+
+--line items
+l.sku as upc,
+l.greeting_card_type,
+
+-- calculate weight per order item
+case 
+  when l.greeting_card_type = 'gift_card' then (0.32 * l.quantity)
+  when l.greeting_card_type = 'check' or l.greeting_card_type = 'cash' then (0.04 * l.quantity)
+  when l.greeting_card_type = 'photos' then (0.18 * l.quantity)
+  when l.greeting_card_type = 'envelope' then (r.card_plus_ep_weight::decimal(4,3) * l.quantity)
+  else null
+  end as item_weight,
+  
+-- calculate thickness per order item
+case 
+  when l.greeting_card_type = 'gift_card' then (0.06 * l.quantity)
+  when l.greeting_card_type = 'check' or l.greeting_card_type = 'cash' then (0.004 * l.quantity)
+  when l.greeting_card_type = 'photos' then (0.01 * l.quantity)
+  when l.greeting_card_type = 'envelope' then (r.thickness_in_inches::decimal(4,3) * l.quantity)
+  else null
+  end as item_thickness,
+  
+-- clean product length and width 
+case when len(prod_length) >1 then (prod_length)::numeric(4,2) else null end as prod_length,
+case when len(prod_width) >1 then (prod_width)::numeric(4,2) else null end as prod_width,
+
+l.sequential_number,
+
+-- calculate item types per order
+(count(l.sequential_number) over (partition by public_order_number))-1 as types_per_order,
+
+-- calculate total items per order
+(sum(l.quantity) over (partition by public_order_number))-1 as items_per_order,
+
+sum(item_weight) over (partition by public_order_number) as order_weight,
+sum(item_thickness) over (partition by public_order_number) as order_thickness,
+
+--to filter multiple quantity items
+case when l.quantity > 1 then 1 else 0 end as dupe_item_flag,
+
+-- find envelope only scans
+case when l.sequential_number = '0001' and l.sku is null then 1 else 0 end as no_scanned_card_order,
+case when l.sku is null then 1 else 0 end as no_scanned_card_item,
+
+-- calculate orders per member ID
+count(public_order_number) over (partition by(case when greeting_card_type = 'envelope' then ms.member_id else null end)) as orders_per_member,
+
+l.quantity,
+ar.state,
+
+-- redis temp table
+r.ep_size,
+-- change url from http to https
+case when r.url is not null then concat( 'https', trim('http' from r.url)) else null end as  url,
+
+--product attributes
+pa.material_number,
+pa.occasion,
+pa.product_brand,
+
+--Appsflyer attribution
+ap.media_source,
+ap.campaign,
+ap.adset,
+ap.ad,
+ap.channel,
+
+--promo codes
+pc.code as promo_code,
+pc.amount as promo_code_amount,
+
+--orders
+convert_timezone('utc','pst',o.order_date) as order_datetime,
+o.public_order_number,
+o.total as order_total,
+o.is_test,
+-- flag orders with Hallmark/test emails attached to account
+case when o.email like lower('%hallmark%') or o.email like '%+%' or o.email like '%valuestreamengineers%' or o.email like '%wdlevyre%' then 1 else 0 end as is_hallmark,
+
+--recipients
+ar.quantity as recipient_quantity,
+
+--per line item
+ar.amount as recipient_item_amount,
+ar.tax as recipient_item_tax,
+ar.total as recipient_item_total,
+ar.state as recipient_order_state,
+ar.scac,
+ar.carrier_service_code,
+
+--- cybersource
+c.merchantreferencenumber,
+sum(vc.amount) over (partition by vc.merchantreferencenumber) as amount_paid,
+vc.billto_zip,
+vc.billto_state,
+
+-- recipient postal code from in-app entry
+a.postal_code,
+
+
+-- member stubs
+ms.member_id,
+
+o.metacreatedatetime,
+o.metaupdatedatetime
+
+
+from
+staging.line_items l 
+left join staging.orders o on l.order_id = o.id
+left join eagle_appsflyer_v ap on o.internal_order_number = ap.internal_order_number
+left join c on o.internal_order_number = c.merchantdefineddatafield3
+left join cybersource_transactions vc on o.internal_order_number = vc.merchantdefineddatafield3
+--get postage calculation attributes from redis
+left join redis_temp r on r.upc = l.sku
+left join staging.member_stubs_bkp ms on o.member_stub_id = ms.id
+left join pa on l.sku = pa.sku_upc
+left join staging.recipients ar on ar.line_item_id = l.id
+--join addresses with recipients to get recipient zipcode
+left join staging.addresses a on ar.address_id = a.id
+left join staging.promo_codes pc on pc.order_id = o.id
+where o.vertical_id = '33' 
+
+
+)
