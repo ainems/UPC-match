@@ -1,0 +1,52 @@
+create view eagle_appsflyer_v as (
+
+select
+-- for reference on report
+convert_timezone('PST', getdate()::date) as data_date,
+
+attributed_touch_type, 
+attributed_touch_time,
+
+-- timezone conversions
+convert_timezone('America/Los_Angeles',install_time::timestamp) as install_time, 
+convert_timezone('America/Los_Angeles',event_time::timestamp) as event_time, 
+
+event_name,
+-- text search to move values into fields
+json_extract_path_text(replace(event_value, '""','"'),'af_customer_user_id',true) as member_id,
+json_extract_path_text(replace(event_value, '""','"'),'af_registration_method',true) as reg_method,
+json_extract_path_text(replace(event_value, '""','"'),'af_content_id',true) as UPC,
+json_extract_path_text(replace(event_value, '""','"'),'af_receipt_id',true) as internal_order_number,
+
+case when event_revenue <> '' then event_revenue::numeric(4,2) else 0 end as event_revenue, 
+event_revenue_currency, event_revenue_usd, event_source, is_receipt_validated, partner, 
+case when media_source = '' then 'organic' else media_source end as media_source, 
+
+-- create organic value in media source, campaign, adset, ad fields
+case 
+  when media_source = '' then 'organic'
+  when campaign = 'None' then media_source
+  else campaign end as campaign, 
+case 
+  when media_source = '' then 'organic' 
+  when campaign = ''or campaign = 'None' then media_source 
+  else adset end as adset, 
+case 
+  when media_source = '' then 'organic' 
+  when adset = '' and campaign <> 'None' then campaign
+  when adset = 'Test' then 'Test'
+  when ad = '' and (adset = 'None' or adset = '') then media_source
+  when ad = '' and (adset <> 'None' or adset <> '')then adset
+  else ad end as ad, 
+case 
+  when media_source = '' then 'organic'
+  when channel = '' and len(media_source) > 2 then media_source
+  else channel end as channel, 
+
+keywords, campaign_id, adset_id, ad_id, ad_type, site_id, sub_site_id, sub_param_1, sub_param_2, sub_param_3, sub_param_4, sub_param_5, cost_model, cost_value, cost_currency, contributor_1_partner, contributor_1_media_source, contributor_1_campaign, contributor_1_touch_type, contributor_1_touch_time, contributor_2_partner, contributor_2_media_source, contributor_2_campaign, contributor_2_touch_type, contributor_2_touch_time, contributor_3_partner, contributor_3_media_source, contributor_3_campaign, contributor_3_touch_type, contributor_3_touch_time, region, country_code, state, city, postal_code, dma, ip, wifi, operator, carrier, language, appsflyer_id, advertising_id, idfa, android_id, customer_user_id, imei, idfv, platform, device_type, os_version, app_version, sdk_version, app_id, app_name, bundle_id, is_retargeting, retargeting_conversion_type, attribution_lookback, reengagement_window, is_primary_attribution, user_agent, http_referrer, original_url, report_name, metacreatedatetime, metaupdatedatetime
+
+
+FROM reporting.vw_appsflyer_reports_import_eagle
+
+
+)
